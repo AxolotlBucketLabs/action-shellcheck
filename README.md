@@ -1,168 +1,114 @@
 # ShellCheck
 
-_GitHub action for [ShellCheck](https://www.shellcheck.net/)._
+[![CI](https://github.com/AxolotlBucketLabs/action-shellcheck/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AxolotlBucketLabs/action-shellcheck/actions/workflows/ci.yml)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Example
+A GitHub Action that runs [ShellCheck](https://www.shellcheck.net/) on shell scripts in your repository. Choose scan directories or pass an explicit file list, including changed files from another action.
+
+## Use the action
 
 ```yaml
-on:
-  push:
-    branches:
-      - master
-
-name: "Trigger: Push action"
-permissions: {}
-
-jobs:
-  shellcheck:
-    name: Shellcheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@master
+steps:
+  - uses: actions/checkout@v7
+  - name: Run ShellCheck
+    uses: AxolotlBucketLabs/action-shellcheck@v2
 ```
 
-## ShellCheck options
+The default `version` is `stable`. To use a fixed release, set a version such as `v0.11.0`. Set `version: system` to use a ShellCheck binary already available in `PATH`. If it is missing, the action fails with an error.
 
-You can pass any supported ShellCheck option or flag with the `SHELLCHECK_OPTS` env key in the job definition.
+## Choose files to check
 
-Some examples include:
-
-- To disable specific checks (eg: `-e SC2059 -e SC2034 -e SC1090`)
-- To test against different shells (eg: `-s dash` or `-s ksh`)
-
-example:
+By default, the action scans the repository for known shell filenames and extensionless executable scripts with a shell shebang. Set `scandir` to one directory or a newline-separated list. Paths may contain spaces.
 
 ```yaml
-    ...
-    - name: Run ShellCheck
-      uses: ludeeus/action-shellcheck@master
-      env:
-        SHELLCHECK_OPTS: -e SC2059 -e SC2034 -e SC1090
+- name: Run ShellCheck in selected directories
+  uses: AxolotlBucketLabs/action-shellcheck@v2
+  with:
+    scandir: |
+      scripts
+      tools with spaces
+```
+
+Use `additional_files` for unusual filenames or relative path patterns. Patterns without `/` match filenames. Patterns containing `/` match paths.
+
+```yaml
+- name: Check generated scripts
+  uses: AxolotlBucketLabs/action-shellcheck@v2
+  with:
+    additional_files: helpers/helpers.v2.1.d/*
+```
+
+Set `all_scripts: true` to include extensionless executable files with any shebang. Use this for shell scripts that have a nonstandard interpreter path. The option assumes those files contain shell code, so leave it off when the directory contains scripts for other languages.
+
+To pass an explicit list, use `only_files`. It accepts one path per line, runs ShellCheck on the original files, applies the ignore inputs, and skips paths that no longer exist. When used, it takes the place of directory scanning.
+
+```yaml
+- name: Find changed shell scripts
+  id: changed
+  uses: tj-actions/changed-files@v47.0.6
+  with:
+    files: |
+      **/*.sh
+    separator: "\n"
+
+- name: Check changed scripts
+  uses: AxolotlBucketLabs/action-shellcheck@v2
+  with:
+    only_files: ${{ steps.changed.outputs.all_changed_files }}
+```
+
+Set `SHELLCHECK_OPTS` to pass additional ShellCheck flags:
+
+```yaml
+- name: Run ShellCheck with extra exclusions
+  uses: AxolotlBucketLabs/action-shellcheck@v2
+  env:
+    SHELLCHECK_OPTS: -e SC2059 -e SC2034
 ```
 
 ## Ignore paths and names
 
-You can use the `ignore_paths` and `ignore_names` input to disable specific directories and files.
-These are passed as environment variables, and should evaluate to a single space-separated string.
-It may be convenient to use [`>-`](https://yaml.org/spec/1.2.2/#65-line-folding) for readability if you have multiple selectors.
-
-```text
-sample structure:
-sample/directory/with/files/ignoreme/test.sh
-sample/directory/with/files/ignoremetoo/test.sh
-sample/directory/with/files/test.sh
-sample/directory/with/files/ignorable.sh
-```
-
-example:
+`ignore_paths` accepts space-separated paths or glob patterns. `ignore_names` accepts space-separated filenames or filename patterns. For compatibility, `ignore` remains available and takes precedence over `ignore_paths` when set.
 
 ```yaml
-    ...
-    - name: Run ShellCheck
-      uses: ludeeus/action-shellcheck@master
-      with:
-        ignore_paths: >-
-          ignoreme
-          ignoremetoo
-        ignore_names: ignorable.sh
+- name: Run ShellCheck
+  uses: AxolotlBucketLabs/action-shellcheck@v2
+  with:
+    ignore_paths: >-
+      generated
+      **/vendor/*.sh
+    ignore_names: local.sh
 ```
 
-This will skip `sample/directory/with/files/ignoreme/test.sh`, `sample/directory/with/files/ignoremetoo/test.sh` and `sample/directory/with/files/ignorable.sh`.
+Symbolic links are ignored by default. Set `ignore_symlinks: false` to check links to files. Directory links are not traversed.
 
-You can also ignore specific files using full paths or glob patterns with `ignore_paths`.
+## Output and annotations
 
-example:
+The default `gcc` format creates GitHub annotations for ShellCheck errors, warnings, and notes. Set `disable_matcher: true` to turn them off. Other output formats are `checkstyle`, `diff`, `json`, `json1`, `quiet`, and `tty`.
+
+The `files` output remains a space-separated list for compatibility. Use `files_list` for a newline-separated list that preserves spaces in file paths. The `options` output contains the action's format and severity options.
 
 ```yaml
-    ...
-    - name: Run ShellCheck
-      uses: ludeeus/action-shellcheck@master
-      with:
-        ignore_paths: ./sample/directory/with/files/ignorable.sh **/ignoreme/test.sh
+- name: Run ShellCheck
+  id: shellcheck
+  uses: AxolotlBucketLabs/action-shellcheck@v2
+  with:
+    scandir: scripts
+
+- name: Show checked files
+  env:
+    FILES: ${{ steps.shellcheck.outputs.files_list }}
+  run: printf '%s\n' "$FILES"
 ```
 
-This will skip `sample/directory/with/files/ignorable.sh` and `sample/directory/with/files/ignoreme/test.sh`.
+Set `check_together: true` to pass all selected files to one ShellCheck process. This can help with `SC1090` and `SC1091`, but a very large file list may exceed the runner's argument limit.
 
-## Minimum severity of errors to consider (error, warning, info, style)
+## Runner requirements
 
-You can use the `severity` input to not fail until specified severity is met, for example fail only if there are errors in scripts but ignore styling, info and warnings.
+The action supports Linux and macOS x64 and ARM64 runners. It also supports Linux 32-bit ARM where a matching ShellCheck release asset is available. Windows runners are not supported.
 
-example:
+Self-hosted runners and job containers need Bash, `curl`, `tar` with xz support, `find`, `mktemp`, `od`, and `tr`. Set `version: system` only when ShellCheck is installed on the runner.
 
-```yaml
-    ...
-    - name: Run ShellCheck
-      uses: ludeeus/action-shellcheck@master
-      with:
-        severity: error
-```
+## License
 
-## Run shellcheck with all paths in a single invocation
-
-If you run into SC1090/SC1091 errors you may need to tell shellcheck to check
-all files at once:
-
-```yaml
-    ...
-    - name: Run ShellCheck
-      uses: ludeeus/action-shellcheck@master
-      with:
-        check_together: 'yes'
-```
-
-This can turn into a problem if you have enough script files to overwhelm the
-maximum argv length on your system.
-
-## Run shellcheck only in a single directory
-
-If you have multiple directories with scripts, but only want to scan
-one of them, you can use the following configuration:
-
-```yaml
-   ...
-   - name: Run ShellCheck
-     uses: ludeeus/action-shellcheck@master
-     with:
-       scandir: './scripts'
-```
-
-## Scan for additional files
-
-If you need to scan for unusual files, you can use the `additional_files` key.
-
-```yaml
-   ...
-   - name: Run ShellCheck
-     uses: ludeeus/action-shellcheck@master
-     with:
-       additional_files: 'run finish'
-```
-
-## Change output format
-
-Shellcheck can print output in these formats: `checkstyle`, `diff`, `gcc`, `json`, `json1`, `quiet`, `tty`. See some examples [here](https://github.com/koalaman/shellcheck/wiki/Integration#pick-the-output-format-that-makes-your-life-easier).
-
-- `tty` has multi-line log messages
-- `gcc` has single-line log messages
-
-```yaml
-   ...
-   - name: Run ShellCheck
-     uses: ludeeus/action-shellcheck@master
-     with:
-       format: tty
-```
-
-## Run a specific version of Shellcheck
-
-If running the latest stable version of Shellcheck is not to your liking, you can specify a concrete version of Shellcheck to be used. When specifying a custom version, please use any of the released versions listed in the [Shellcheck repository](https://github.com/koalaman/shellcheck/tags).
-
-```yaml
-   ...
-   - name: Run ShellCheck
-     uses: ludeeus/action-shellcheck@master
-     with:
-       version: v0.9.0
-```
+This project is distributed under the MIT License. See [LICENSE](LICENSE).

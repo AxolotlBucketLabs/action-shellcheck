@@ -1,0 +1,270 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Ubuntu x64
+            runner: ubuntu-latest
+            system_shellcheck: true
+          - label: Ubuntu ARM64
+            runner: ubuntu-24.04-arm
+            system_shellcheck: false
+          - label: macOS Intel
+            runner: macos-15-intel
+            system_shellcheck: false
+          - label: macOS ARM64
+            runner: macos-15
+            system_shellcheck: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Scan multiple directories
+        id: multiple
+        uses: ./
+        with:
+          version: v0.11.0
+          scandir: |
+            testfiles/scandir
+            testfiles/secondary
+
+      - name: Verify multiple-directory results
+        env:
+          FILES_LIST: ${{ steps.multiple.outputs.files_list }}
+          FILES: ${{ steps.multiple.outputs.files }}
+          OPTIONS: ${{ steps.multiple.outputs.options }}
+        run: |
+          set -euo pipefail
+          for expected in "testfiles/scandir/test.bash" "testfiles/secondary/secondary.sh"; do
+            if ! printf '%s\n' "$FILES_LIST" | grep -Fqx -- "$expected"; then
+              printf 'A scanned file was missing from the action output.\n' >&2
+              exit 1
+            fi
+          done
+          case " $FILES " in
+            *" testfiles/scandir/test.bash "*) ;;
+            *) printf 'The legacy files output did not include the scanned file.\n' >&2; exit 1 ;;
+          esac
+          if [[ "$OPTIONS" != --format=gcc ]]; then
+            printf 'The options output did not report the active format.\n' >&2
+            exit 1
+          fi
+
+      - name: Match an additional path pattern
+        id: additional-path
+        uses: ./
+        with:
+          version: v0.11.0
+          scandir: testfiles/additional
+          additional_files: helpers/helpers.v2.1.d/*
+
+      - name: Verify the additional path result
+        env:
+          FILES_LIST: ${{ steps.additional-path.outputs.files_list }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$FILES_LIST" | grep -Fqx -- 'testfiles/additional/helpers/helpers.v2.1.d/library'; then
+            printf 'The additional path pattern did not select its file.\n' >&2
+            exit 1
+          fi
+
+      - name: Check an explicit file list
+        id: only-files
+        uses: ./
+        with:
+          version: v0.11.0
+          only_files: |
+            testfiles/scandir/run me.bash
+            testfiles/test.bash
+            testfiles/missing.sh
+
+      - name: Verify explicit file paths
+        env:
+          FILES_LIST: ${{ steps.only-files.outputs.files_list }}
+        run: |
+          set -euo pipefail
+          for expected in "testfiles/scandir/run me.bash" "testfiles/test.bash"; do
+            if ! printf '%s\n' "$FILES_LIST" | grep -Fqx -- "$expected"; then
+              printf 'An existing explicit file was missing from the output.\n' >&2
+              exit 1
+            fi
+          done
+          if printf '%s\n' "$FILES_LIST" | grep -Fqx -- 'testfiles/missing.sh'; then
+            printf 'A missing explicit file should have been skipped.\n' >&2
+            exit 1
+          fi
+
+      - name: Apply ignore inputs to explicit files
+        id: only-files-ignore
+        uses: ./
+        with:
+          version: v0.11.0
+          only_files: |
+            testfiles/ignore/ignore.bash
+            testfiles/ignore_some/ignore.bash
+            testfiles/ignore_single_file.sh
+            testfiles/test.bash
+            testfiles/test.sh
+          ignore_paths: |
+            ignore
+            **/ignore_some/ignore.bash
+            testfiles/ignore_single_file.sh
+          ignore_names: test.sh
+
+      - name: Verify ignore inputs
+        env:
+          FILES_LIST: ${{ steps.only-files-ignore.outputs.files_list }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$FILES_LIST" | grep -Fqx -- 'testfiles/test.bash'; then
+            printf 'The non-ignored file should have been checked.\n' >&2
+            exit 1
+          fi
+          if printf '%s\n' "$FILES_LIST" | grep -Fqx -- 'testfiles/ignore/ignore.bash'; then
+            printf 'The ignored path should not have been checked.\n' >&2
+            exit 1
+          fi
+          for ignored in "testfiles/ignore_some/ignore.bash" "testfiles/ignore_single_file.sh"; do
+            if printf '%s\n' "$FILES_LIST" | grep -Fqx -- "$ignored"; then
+              printf 'An ignored path pattern was still checked.\n' >&2
+              exit 1
+            fi
+          done
+          if printf '%s\n' "$FILES_LIST" | grep -Fqx -- 'testfiles/test.sh'; then
+            printf 'The ignored filename should not have been checked.\n' >&2
+            exit 1
+          fi
+
+      - name: Check extensionless scripts with unusual shebangs
+        id: all-scripts
+        uses: ./
+        with:
+          version: v0.11.0
+          scandir: testfiles/custom-shebang
+          all_scripts: true
+
+      - name: Verify the unusual shebang result
+        env:
+          FILES_LIST: ${{ steps.all-scripts.outputs.files_list }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$FILES_LIST" | grep -Fqx -- 'testfiles/custom-shebang/nonstandard'; then
+            printf 'The executable script with a custom shebang was not selected.\n' >&2
+            exit 1
+          fi
+
+      - name: Ignore symbolic links by default
+        id: ignored-links
+        uses: ./
+        with:
+          version: v0.11.0
+          scandir: testfiles/symlinks
+
+      - name: Verify the default symlink behavior
+        env:
+          FILES_LIST: ${{ steps.ignored-links.outputs.files_list }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$FILES_LIST" ]]; then
+            printf 'Symbolic links should be ignored by default.\n' >&2
+            exit 1
+          fi
+
+      - name: Check symbolic links to files when requested
+        id: included-links
+        uses: ./
+        with:
+          version: v0.11.0
+          scandir: testfiles/symlinks
+          ignore_symlinks: false
+
+      - name: Verify the opt-in symlink behavior
+        env:
+          FILES_LIST: ${{ steps.included-links.outputs.files_list }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$FILES_LIST" | grep -Fqx -- 'testfiles/symlinks/linked.sh'; then
+            printf 'The symbolic link to a file was not checked.\n' >&2
+            exit 1
+          fi
+
+      - name: Check a fixed ShellCheck release with all files together
+        uses: ./
+        with:
+          version: v0.11.0
+          only_files: |
+            testfiles/test.bash
+            testfiles/scandir/test.bash
+          check_together: true
+
+      - name: Verify GCC annotations
+        id: annotation
+        continue-on-error: true
+        uses: ./
+        with:
+          version: v0.11.0
+          only_files: testfiles/annotation.sh
+
+      - name: Verify the expected ShellCheck warning
+        env:
+          ACTION_OUTCOME: ${{ steps.annotation.outcome }}
+        run: |
+          if [[ "$ACTION_OUTCOME" != failure ]]; then
+            printf 'The annotation fixture should produce a ShellCheck warning.\n' >&2
+            exit 1
+          fi
+
+      - name: Use the runner-installed ShellCheck
+        if: matrix.system_shellcheck
+        uses: ./
+        with:
+          version: system
+          only_files: scripts/run-shellcheck.sh
+          format: quiet
+
+      - name: Use the stable ShellCheck release
+        if: matrix.system_shellcheck
+        uses: ./
+        with:
+          only_files: scripts/run-shellcheck.sh
+          format: quiet
+
+  container:
+    name: Linux container runner
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - name: Install runner prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git findutils xz-utils
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the action in a container
+        uses: ./
+        with:
+          version: v0.11.0
+          only_files: scripts/run-shellcheck.sh
+          format: quiet
